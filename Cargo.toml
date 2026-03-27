@@ -3,6 +3,7 @@ name = "tokc"
 version = "0.1.0"
 edition = "2024"
 description = "Count tokens from stdin or files, with colorized tokenization display"
+license = "MIT"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
