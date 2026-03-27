@@ -2,5 +2,11 @@
 name = "tokc"
 version = "0.1.0"
 edition = "2024"
+description = "Count tokens from stdin or files, with colorized tokenization display"
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
+tiktoken-rs = "0.9"
+claude-tokenizer = "0.3"
+colored = "3"
+anyhow = "1"
