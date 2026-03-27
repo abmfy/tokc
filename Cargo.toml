@@ -1,9 +1,10 @@
 [package]
 name = "tokc"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Count tokens from stdin or files, with colorized tokenization display"
 license = "MIT"
+repository = "https://github.com/abmfy/tokc"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
