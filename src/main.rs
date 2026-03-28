@@ -138,33 +138,29 @@ fn token_to_bytes(tok: &str, map: &[u8; 512]) -> Vec<u8> {
         .collect()
 }
 
-/// Decode all sentencepiece-style BPE tokens into strings, handling UTF-8
-/// sequences that span token boundaries. Returns one String per token.
-fn decode_spm_tokens(tokens: &[String]) -> Vec<String> {
-    let map = build_unicode_to_byte_map();
-
-    // First, convert each token to its raw bytes and record byte ranges.
+/// Given per-token raw byte chunks, concatenate, decode as UTF-8, and re-split
+/// at character boundaries. A character is assigned to the token that contains
+/// its last byte (i.e. the token that "completes" the character).
+fn reassemble_tokens_from_bytes(token_bytes: Vec<Vec<u8>>) -> Vec<String> {
     let mut all_bytes = Vec::new();
     let mut token_byte_ranges: Vec<(usize, usize)> = Vec::new();
-    for tok in tokens {
+    for chunk in &token_bytes {
         let start = all_bytes.len();
-        all_bytes.extend(token_to_bytes(tok, &map));
+        all_bytes.extend(chunk);
         token_byte_ranges.push((start, all_bytes.len()));
     }
 
-    // Decode the full byte stream as UTF-8 (lossy for safety).
     let full_string = String::from_utf8_lossy(&all_bytes);
+    let chars: Vec<char> = full_string.chars().collect();
 
-    // Map each byte offset to the char index it belongs to.
+    // Build a map from byte offset → char index.
+    // For continuation bytes, map to the same char as the start byte.
     let mut byte_to_char = vec![0usize; all_bytes.len() + 1];
+    let total_chars = chars.len();
     for (ci, (bi, _)) in full_string.char_indices().enumerate() {
-        // Mark the start byte of each char
         byte_to_char[bi] = ci;
     }
-    // Fill in continuation bytes and the end sentinel.
-    let total_chars = full_string.chars().count();
     byte_to_char[all_bytes.len()] = total_chars;
-    // Backfill: continuation bytes get the same char index as their start byte.
     let mut last = 0;
     for i in 0..=all_bytes.len() {
         if i < all_bytes.len() && (all_bytes[i] & 0xC0) == 0x80 && i > 0 {
@@ -174,19 +170,26 @@ fn decode_spm_tokens(tokens: &[String]) -> Vec<String> {
         }
     }
 
-    // Collect chars from the full decoded string.
-    let chars: Vec<char> = full_string.chars().collect();
-
-    // Split the decoded string according to token boundaries (snapped to char boundaries).
-    let mut result = Vec::with_capacity(tokens.len());
-    for &(byte_start, byte_end) in &token_byte_ranges {
-        let char_start = byte_to_char[byte_start];
+    // Assign each character to the token that ends it (contains the last byte).
+    // Use the *end* byte offset to determine which chars belong to each token.
+    let mut result = Vec::with_capacity(token_bytes.len());
+    let mut char_cursor = 0;
+    for &(_byte_start, byte_end) in &token_byte_ranges {
         let char_end = byte_to_char[byte_end];
-        let s: String = chars[char_start..char_end].iter().collect();
+        let s: String = chars[char_cursor..char_end].iter().collect();
         result.push(s);
+        char_cursor = char_end;
     }
 
     result
+}
+
+/// Decode all sentencepiece-style BPE tokens into strings, handling UTF-8
+/// sequences that span token boundaries. Returns one String per token.
+fn decode_spm_tokens(tokens: &[String]) -> Vec<String> {
+    let map = build_unicode_to_byte_map();
+    let byte_chunks: Vec<Vec<u8>> = tokens.iter().map(|t| token_to_bytes(t, &map)).collect();
+    reassemble_tokens_from_bytes(byte_chunks)
 }
 
 fn read_input(file: Option<&str>) -> Result<String> {
@@ -274,9 +277,12 @@ fn run() -> Result<()> {
             let enc_name = encoding_name(tokenizer);
 
             if cli.colorize {
-                let tokens = bpe.split_by_token(&text, true)?;
-                let count = tokens.len();
-                print_colorized(&tokens);
+                let token_ids = bpe.encode_with_special_tokens(&text);
+                let count = token_ids.len();
+                let byte_chunks: Vec<Vec<u8>> =
+                    bpe._decode_native_and_split(token_ids).collect();
+                let token_strings = reassemble_tokens_from_bytes(byte_chunks);
+                print_colorized(&token_strings);
                 println!();
                 println!(
                     "{} {} (encoding: {})",
