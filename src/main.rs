@@ -102,24 +102,91 @@ fn print_colorized(tokens: &[String]) {
     println!();
 }
 
-/// Decode sentencepiece-style BPE tokens (Ġ → space, Ċ → newline, etc.)
-fn decode_spm_token(tok: &str) -> String {
+/// Build the reverse mapping from Unicode codepoints back to bytes,
+/// matching the GPT-2 / sentencepiece bytes_to_unicode() table.
+fn build_unicode_to_byte_map() -> [u8; 512] {
+    // The GPT-2 bytes_to_unicode mapping:
+    // - Bytes 33..=126, 161..=172, 174..=255 map to their own codepoint
+    // - Remaining bytes (0..=32, 127..=160, 173) map to U+0100..U+0143
+    let mut table = [0u8; 512];
+    let mut n: u32 = 0;
+    for b in 0u16..=255 {
+        let cp = match b as u8 {
+            33..=126 | 161..=172 | 174..=255 => b as u32,
+            _ => {
+                let cp = 256 + n;
+                n += 1;
+                cp
+            }
+        };
+        table[cp as usize] = b as u8;
+    }
+    table
+}
+
+/// Decode a single token's chars into raw bytes using the byte-to-unicode map.
+fn token_to_bytes(tok: &str, map: &[u8; 512]) -> Vec<u8> {
     tok.chars()
         .map(|c| {
-            // sentencepiece uses a byte-to-unicode mapping where:
-            // Ġ (U+0120) = space (0x20), Ċ (U+010A) = newline (0x0A), etc.
             let code = c as u32;
-            if code >= 0x100 {
-                // Map back: the original byte = code - 0x100 for range 0x100..0x1FF
-                // Actually the sentencepiece mapping is: byte 0x20 -> Ġ (0x120)
-                // So byte = code - 0x100
-                let byte = (code - 0x100) as u8;
-                byte as char
+            if (code as usize) < map.len() {
+                map[code as usize]
             } else {
-                c
+                b'?'
             }
         })
         .collect()
+}
+
+/// Decode all sentencepiece-style BPE tokens into strings, handling UTF-8
+/// sequences that span token boundaries. Returns one String per token.
+fn decode_spm_tokens(tokens: &[String]) -> Vec<String> {
+    let map = build_unicode_to_byte_map();
+
+    // First, convert each token to its raw bytes and record byte ranges.
+    let mut all_bytes = Vec::new();
+    let mut token_byte_ranges: Vec<(usize, usize)> = Vec::new();
+    for tok in tokens {
+        let start = all_bytes.len();
+        all_bytes.extend(token_to_bytes(tok, &map));
+        token_byte_ranges.push((start, all_bytes.len()));
+    }
+
+    // Decode the full byte stream as UTF-8 (lossy for safety).
+    let full_string = String::from_utf8_lossy(&all_bytes);
+
+    // Map each byte offset to the char index it belongs to.
+    let mut byte_to_char = vec![0usize; all_bytes.len() + 1];
+    for (ci, (bi, _)) in full_string.char_indices().enumerate() {
+        // Mark the start byte of each char
+        byte_to_char[bi] = ci;
+    }
+    // Fill in continuation bytes and the end sentinel.
+    let total_chars = full_string.chars().count();
+    byte_to_char[all_bytes.len()] = total_chars;
+    // Backfill: continuation bytes get the same char index as their start byte.
+    let mut last = 0;
+    for i in 0..=all_bytes.len() {
+        if i < all_bytes.len() && (all_bytes[i] & 0xC0) == 0x80 && i > 0 {
+            byte_to_char[i] = last;
+        } else {
+            last = byte_to_char[i];
+        }
+    }
+
+    // Collect chars from the full decoded string.
+    let chars: Vec<char> = full_string.chars().collect();
+
+    // Split the decoded string according to token boundaries (snapped to char boundaries).
+    let mut result = Vec::with_capacity(tokens.len());
+    for &(byte_start, byte_end) in &token_byte_ranges {
+        let char_start = byte_to_char[byte_start];
+        let char_end = byte_to_char[byte_end];
+        let s: String = chars[char_start..char_end].iter().collect();
+        result.push(s);
+    }
+
+    result
 }
 
 fn read_input(file: Option<&str>) -> Result<String> {
@@ -226,8 +293,8 @@ fn run() -> Result<()> {
             if cli.colorize {
                 let tokens = claude_tokenizer::tokenize(&text)?;
                 let count = tokens.len();
-                let token_strings: Vec<String> =
-                    tokens.into_iter().map(|(_, s)| decode_spm_token(&s)).collect();
+                let raw_tokens: Vec<String> = tokens.into_iter().map(|(_, s)| s).collect();
+                let token_strings = decode_spm_tokens(&raw_tokens);
                 print_colorized(&token_strings);
                 println!();
                 println!(
