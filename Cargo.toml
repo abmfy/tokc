@@ -1,6 +1,6 @@
 [package]
 name = "tokc"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 description = "Count tokens from stdin or files, with colorized tokenization display"
 license = "MIT"
